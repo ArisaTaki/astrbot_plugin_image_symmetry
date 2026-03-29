@@ -1,3 +1,4 @@
+import asyncio
 import io
 from typing import Iterable
 
@@ -8,6 +9,10 @@ from astrbot.api.star import Context, Star, register
 from PIL import Image as PILImage
 from PIL import ImageSequence
 
+MAX_INPUT_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_PIXELS = 40_000_000
+MAX_GIF_FRAMES = 100
+
 
 HELP_TEXT = (
     "图像对称插件使用说明：\n"
@@ -17,7 +22,8 @@ HELP_TEXT = (
     "- /对称、/对称左 或 /左对称：将左半部分镜像到右半部分\n"
     "- /对称右 或 /右对称：将右半部分镜像到左半部分\n"
     "- /对称上 或 /上对称：将上半部分镜像到下半部分\n"
-    "- /对称下 或 /下对称：将下半部分镜像到上半部分"
+    "- /对称下 或 /下对称：将下半部分镜像到上半部分\n\n"
+    "限制说明：图片大小不超过 10MB，像素总量不超过 4000 万，GIF 不超过 100 帧。"
 )
 
 COMMAND_TO_DIRECTION = {
@@ -85,20 +91,50 @@ def _save_static_image(img: PILImage.Image, original_format: str | None) -> byte
 def _save_gif(frames: list[PILImage.Image], durations: list[int], original_img: PILImage.Image) -> bytes:
     output = io.BytesIO()
     processed_frames = [frame if frame.mode == "RGBA" else frame.convert("RGBA") for frame in frames]
-    processed_frames[0].save(
-        output,
-        format="GIF",
-        append_images=processed_frames[1:],
-        save_all=True,
-        duration=durations,
-        loop=0,
-        disposal=original_img.info.get("disposal", 2),
-        optimize=False,
-    )
-    return output.getvalue()
+    try:
+        processed_frames[0].save(
+            output,
+            format="GIF",
+            append_images=processed_frames[1:],
+            save_all=True,
+            duration=durations,
+            loop=0,
+            disposal=original_img.info.get("disposal", 2),
+            optimize=False,
+        )
+        return output.getvalue()
+    finally:
+        for processed_frame in processed_frames:
+            if processed_frame not in frames:
+                processed_frame.close()
+
+
+def _close_images(images: Iterable[PILImage.Image]) -> None:
+    for image in images:
+        try:
+            image.close()
+        except Exception:
+            logger.exception("关闭图片资源失败")
+
+
+def _validate_image_bytes(img_bytes: bytes) -> None:
+    if len(img_bytes) > MAX_INPUT_BYTES:
+        raise ValueError("图片过大，请发送 10MB 以内的图片。")
+
+    with PILImage.open(io.BytesIO(img_bytes)) as img:
+        width, height = img.size
+        if width * height > MAX_IMAGE_PIXELS:
+            raise ValueError("图片分辨率过高，请发送像素总量不超过 4000 万的图片。")
+
+        if (img.format or "").upper() == "GIF" and getattr(img, "is_animated", False):
+            frame_count = getattr(img, "n_frames", 1)
+            if frame_count > MAX_GIF_FRAMES:
+                raise ValueError("GIF 帧数过多，请发送 100 帧以内的 GIF。")
 
 
 def process_image_bytes(img_bytes: bytes, direction: str) -> bytes:
+    _validate_image_bytes(img_bytes)
+
     with PILImage.open(io.BytesIO(img_bytes)) as img:
         original_format = img.format
         is_animated_gif = (
@@ -109,10 +145,13 @@ def process_image_bytes(img_bytes: bytes, direction: str) -> bytes:
         if is_animated_gif:
             frames = []
             durations = []
-            for frame in ImageSequence.Iterator(img):
-                frames.append(_process_single_frame(frame, direction))
-                durations.append(frame.info.get("duration", 100))
-            return _save_gif(frames, durations, img)
+            try:
+                for frame in ImageSequence.Iterator(img):
+                    frames.append(_process_single_frame(frame, direction))
+                    durations.append(frame.info.get("duration", 100))
+                return _save_gif(frames, durations, img)
+            finally:
+                _close_images(frames)
 
         result_img = _process_single_frame(img, direction)
         try:
@@ -163,7 +202,10 @@ class ImageSymmetryPlugin(Star):
             return
 
         try:
-            processed_bytes = process_image_bytes(img_bytes, direction)
+            processed_bytes = await asyncio.to_thread(process_image_bytes, img_bytes, direction)
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
         except Exception:
             logger.exception("图像对称处理失败")
             yield event.plain_result("图像处理失败，请重试。")

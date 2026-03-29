@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+          pip install -r requirements.txt
+
+      - name: Validate metadata and tag
+        id: meta
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import sys
+          import yaml
+
+          metadata = yaml.safe_load(pathlib.Path("metadata.yaml").read_text(encoding="utf-8"))
+          version = str(metadata["version"])
+          ref = os.getenv("GITHUB_REF_NAME", "")
+
+          if ref and ref.startswith("v") and version != ref:
+              print(f"metadata version {version} does not match tag {ref}")
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"version={version}\n")
+          PY
+
+      - name: Compile Python
+        run: python -m py_compile main.py
+
+      - name: Build release archive
+        run: |
+          mkdir -p dist
+          zip -r "dist/astrbot_plugin_image_symmetry-${{ steps.meta.outputs.version }}.zip" \
+            main.py metadata.yaml requirements.txt README.md LICENSE
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: astrbot_plugin_image_symmetry-${{ steps.meta.outputs.version }}
+          path: dist/*.zip
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+          pip install -r requirements.txt
+
+      - name: Validate repository files
+        run: |
+          test -f main.py
+          test -f metadata.yaml
+          test -f requirements.txt
+          test -f README.md
+
+      - name: Validate metadata
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+          import yaml
+
+          metadata = yaml.safe_load(pathlib.Path("metadata.yaml").read_text(encoding="utf-8"))
+          required_keys = ["name", "display_name", "desc", "version", "author", "repo"]
+          missing = [key for key in required_keys if not metadata.get(key)]
+          if missing:
+              print(f"Missing metadata keys: {missing}")
+              sys.exit(1)
+          if not str(metadata["version"]).startswith("v"):
+              print("metadata.version must start with 'v'")
+              sys.exit(1)
+          PY
+
+      - name: Compile Python
+        run: python -m py_compile main.py

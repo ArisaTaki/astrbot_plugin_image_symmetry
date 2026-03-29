@@ -1,8 +1,11 @@
 name: astrbot_plugin_image_symmetry
 display_name: 图像对称
-desc: 为 AstrBot 提供图片左右上下四种对称变换能力。
+desc: |-
+  为 AstrBot 提供图片左右上下四种对称变换能力。
+
+  严重感谢：https://github.com/GT-610/nonebot-plugin-image-symmetry
 version: v1.0.1
-author: hacchiroku
+author: hacchiroku & GT-610（Nonebot 插件原作者）
 repo: https://github.com/ArisaTaki/astrbot_plugin_image_symmetry
 support_platforms:
   - aiocqhttp

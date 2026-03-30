@@ -2,6 +2,7 @@ import asyncio
 import io
 from typing import Iterable
 
+import aiohttp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Reply
@@ -17,7 +18,8 @@ MAX_GIF_FRAMES = 100
 HELP_TEXT = (
     "图像对称插件使用说明：\n"
     "1. 直接发送：指令 + 图片\n"
-    "2. 回复处理：回复一条带图片的消息，再发送指令\n\n"
+    "2. 回复处理：回复一条带图片的消息，再发送指令\n"
+    "3. 无图片时：自动使用发送者头像进行处理\n\n"
     "支持指令：\n"
     "- /对称、/对称左 或 /左对称：将左半部分镜像到右半部分\n"
     "- /对称右 或 /右对称：将右半部分镜像到左半部分\n"
@@ -41,25 +43,25 @@ def _apply_symmetry(img_rgba: PILImage.Image, result_img: PILImage.Image, direct
     if direction == "left":
         mid_point = width // 2
         left_half = img_rgba.crop((0, 0, mid_point, height))
-        mirrored_left = left_half.transpose(PILImage.FLIP_LEFT_RIGHT)
+        mirrored_left = left_half.transpose(PILImage.Transpose.FLIP_LEFT_RIGHT)
         result_img.paste(left_half, (0, 0), left_half)
         result_img.paste(mirrored_left, (mid_point, 0), mirrored_left)
     elif direction == "right":
         mid_point = width // 2
         right_half = img_rgba.crop((mid_point, 0, width, height))
-        mirrored_right = right_half.transpose(PILImage.FLIP_LEFT_RIGHT)
+        mirrored_right = right_half.transpose(PILImage.Transpose.FLIP_LEFT_RIGHT)
         result_img.paste(right_half, (mid_point, 0), right_half)
         result_img.paste(mirrored_right, (0, 0), mirrored_right)
     elif direction == "top":
         mid_point = height // 2
         top_half = img_rgba.crop((0, 0, width, mid_point))
-        mirrored_top = top_half.transpose(PILImage.FLIP_TOP_BOTTOM)
+        mirrored_top = top_half.transpose(PILImage.Transpose.FLIP_TOP_BOTTOM)
         result_img.paste(top_half, (0, 0), top_half)
         result_img.paste(mirrored_top, (0, mid_point), mirrored_top)
     elif direction == "bottom":
         mid_point = height // 2
         bottom_half = img_rgba.crop((0, mid_point, width, height))
-        mirrored_bottom = bottom_half.transpose(PILImage.FLIP_TOP_BOTTOM)
+        mirrored_bottom = bottom_half.transpose(PILImage.Transpose.FLIP_TOP_BOTTOM)
         result_img.paste(bottom_half, (0, mid_point), bottom_half)
         result_img.paste(mirrored_bottom, (0, 0), mirrored_bottom)
     else:
@@ -185,6 +187,40 @@ async def _extract_first_image_bytes(event: AstrMessageEvent) -> bytes | None:
     return None
 
 
+def _get_avatar_url(event: AstrMessageEvent) -> str | None:
+    """根据平台构造发送者头像 URL。"""
+    user_id = event.get_sender_id()
+    if not user_id:
+        return None
+    platform = event.get_platform_name()
+    if platform == "aiocqhttp":
+        if not user_id.isdigit():
+            return None
+        return f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+    return None
+
+
+async def _fetch_avatar_bytes(event: AstrMessageEvent) -> bytes | None:
+    """尝试下载发送者头像。"""
+    avatar_url = _get_avatar_url(event)
+    if not avatar_url:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                avatar_url, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.read()
+                if len(data) > MAX_INPUT_BYTES:
+                    return None
+                return data
+    except Exception:
+        logger.exception("获取用户头像失败")
+    return None
+
+
 @register(
     "astrbot_plugin_image_symmetry",
     "hacchiroku",
@@ -197,6 +233,8 @@ class ImageSymmetryPlugin(Star):
 
     async def _handle_symmetry(self, event: AstrMessageEvent, direction: str):
         img_bytes = await _extract_first_image_bytes(event)
+        if not img_bytes:
+            img_bytes = await _fetch_avatar_bytes(event)
         if not img_bytes:
             yield event.plain_result("请直接发送图片，或回复一条带图片的消息后再使用该指令。")
             return
